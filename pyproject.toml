@@ -1,0 +1,21 @@
+[tool.poetry]
+name = "license-recognition"
+version = "0.1.0"
+description = ""
+authors = ["Xinyu Mu <mxy2233@outlook.com>"]
+package-mode = false
+
+[tool.poetry.dependencies]
+python = "^3.12"
+numpy = "^2.2.3"
+opencv-python = "^4.11.0.86"
+hyperlpr3 = "^0.1.3"
+alibabacloud_ocr_api20210707 = "3.1.2"
+alibabacloud-tea-openapi = ">=0.3.12,<1.0.0"
+alibabacloud-tea-console = ">=0.0.1,<1.0.0"
+alibabacloud-tea-util = ">=0.3.13,<1.0.0"
+alibabacloud-darabonba-stream = ">=0.0.2,<1.0.0"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
