@@ -17,6 +17,7 @@ alibabacloud-tea-util = ">=0.3.13,<1.0.0"
 alibabacloud-darabonba-stream = ">=0.0.2,<1.0.0"
 paddleocr = "^2.9.1"
 paddlepaddle = "^2.6.2"
+setuptools = "^75.8.2"
 
 [build-system]
 requires = ["poetry-core"]
