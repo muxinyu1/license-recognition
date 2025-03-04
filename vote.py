@@ -1,15 +1,14 @@
-# -*- coding: utf-8 -*-
-# 车牌识别投票系统
-
 import json
 import os
 import re
 import cv2
 import shutil
 import argparse
+import time  # Add timeout functionality
 import hyperlpr3 as lpr3
 from collections import Counter
 from paddleocr import PaddleOCR
+# Import statements for Alibaba Cloud remain the same
 from alibabacloud_ocr_api20210707.client import Client as ocr_api20210707Client
 from alibabacloud_tea_openapi import models as open_api_models
 from alibabacloud_darabonba_stream.client import Client as StreamClient
@@ -18,7 +17,7 @@ from alibabacloud_tea_util import models as util_models
 
 
 class LicensePlateVoting:
-    def __init__(self, review_folder=None):
+    def __init__(self, review_folder=None, timeout=30):
         """初始化车牌识别投票系统"""
         # 初始化HyperLPR3识别器
         self.hyperlpr_catcher = lpr3.LicensePlateCatcher()
@@ -26,6 +25,9 @@ class LicensePlateVoting:
         # 检查阿里云环境变量
         self.access_key_id = os.environ.get('ALIBABA_CLOUD_ACCESS_KEY_ID')
         self.access_key_secret = os.environ.get('ALIBABA_CLOUD_ACCESS_KEY_SECRET')
+        
+        # 设置超时时间（秒）
+        self.timeout = timeout
         
         # 检查是否设置了阿里云环境变量
         self.use_alibaba = False
@@ -38,7 +40,12 @@ class LicensePlateVoting:
             print("未设置阿里云环境变量，将不使用阿里云OCR")
         
         # 初始化PaddleOCR
-        self.paddle_ocr = PaddleOCR(use_angle_cls=True, lang="ch", use_gpu=False)
+        try:
+            self.paddle_ocr = PaddleOCR(use_angle_cls=True, lang="ch", use_gpu=False)
+            print("PaddleOCR初始化成功")
+        except Exception as e:
+            print(f"PaddleOCR初始化失败: {str(e)}")
+            self.paddle_ocr = None
         
         # 需要人工审核的图片存放文件夹
         self.review_folder = review_folder
@@ -64,6 +71,9 @@ class LicensePlateVoting:
     def recognize_with_hyperlpr(self, image_path):
         """使用HyperLPR3识别车牌"""
         try:
+            print(f"  开始HyperLPR3识别: {image_path}")
+            start_time = time.time()
+            
             # 读取图片
             image = cv2.imread(image_path)
             if image is None:
@@ -72,6 +82,10 @@ class LicensePlateVoting:
             
             # 识别车牌
             results = self.hyperlpr_catcher(image)
+            
+            # 计算耗时
+            elapsed = time.time() - start_time
+            print(f"  HyperLPR3识别耗时: {elapsed:.2f}秒")
             
             # 如果有结果返回第一个车牌号
             if results and len(results) > 0:
@@ -88,6 +102,9 @@ class LicensePlateVoting:
             return None
             
         try:
+            print(f"  开始阿里云OCR识别: {image_path}")
+            start_time = time.time()
+            
             # 检查文件是否存在
             if not os.path.exists(image_path):
                 print(f"文件不存在: {image_path}")
@@ -101,12 +118,19 @@ class LicensePlateVoting:
                 body=body_stream
             )
             
-            # 设置运行时选项
-            runtime = util_models.RuntimeOptions()
+            # 设置运行时选项 - 添加超时设置
+            runtime = util_models.RuntimeOptions(
+                connect_timeout=self.timeout * 1000,  # 毫秒
+                read_timeout=self.timeout * 1000  # 毫秒
+            )
             
             # 发送请求并获取响应
             response = self.ali_client.recognize_car_number_with_options(recognize_request, runtime)
             result = response.body.to_map()
+            
+            # 计算耗时
+            elapsed = time.time() - start_time
+            print(f"  阿里云OCR识别耗时: {elapsed:.2f}秒")
             
             # 解析结果
             try:
@@ -121,15 +145,31 @@ class LicensePlateVoting:
     
     def recognize_with_paddle(self, image_path):
         """使用PaddleOCR识别车牌"""
+        # 如果PaddleOCR初始化失败，直接返回None
+        if self.paddle_ocr is None:
+            return None
+            
         try:
+            print(f"  开始PaddleOCR识别: {image_path}")
+            start_time = time.time()
+            
             # 读取图片
             image = cv2.imread(image_path)
             if image is None:
                 print(f"PaddleOCR无法读取图片: {image_path}")
                 return None
             
-            # 识别文本
+            # 设置超时功能
+            # PaddleOCR没有内置的超时功能，我们可以在调用后检查是否超时
             result = self.paddle_ocr.ocr(image, cls=True)
+            
+            # 计算耗时
+            elapsed = time.time() - start_time
+            print(f"  PaddleOCR识别耗时: {elapsed:.2f}秒")
+            
+            # 如果耗时超过超时时间，视为超时
+            if elapsed > self.timeout:
+                print(f"  PaddleOCR识别超时，耗时 {elapsed:.2f}秒 > {self.timeout}秒")
             
             # 如果没有识别结果
             if not result or len(result) == 0 or not result[0]:
@@ -228,19 +268,36 @@ class LicensePlateVoting:
             file_path = os.path.join(root_path, filename)
             
             try:
-                # 获取识别结果
+                # 获取原始识别结果（从文件名）
                 original_plate = self.extract_original_plate(filename)
-                hyperlpr_plate = self.recognize_with_hyperlpr(file_path)
-                paddle_plate = self.recognize_with_paddle(file_path)
+                print(f"  原始识别: {original_plate}")
+                
+                # 使用HyperLPR3识别
+                try:
+                    hyperlpr_plate = self.recognize_with_hyperlpr(file_path)
+                    print(f"  HyperLPR3识别: {hyperlpr_plate}")
+                except Exception as e:
+                    print(f"  HyperLPR3识别异常: {str(e)}")
+                    hyperlpr_plate = None
+                
+                # 使用PaddleOCR识别(添加超时保护)
+                paddle_plate = None
+                try:
+                    # 使用另一个线程来执行PaddleOCR识别可能是更好的方法
+                    # 但为了简单起见，我们在这里只添加异常处理
+                    paddle_plate = self.recognize_with_paddle(file_path)
+                    print(f"  PaddleOCR识别: {paddle_plate}")
+                except Exception as e:
+                    print(f"  PaddleOCR识别异常: {str(e)}")
                 
                 # 阿里云识别结果（仅在启用阿里云时获取）
-                ali_plate = self.recognize_with_ali(file_path)
-                
-                print(f"  原始识别: {original_plate}")
-                print(f"  HyperLPR3识别: {hyperlpr_plate}")
-                print(f"  PaddleOCR识别: {paddle_plate}")
+                ali_plate = None
                 if self.use_alibaba:
-                    print(f"  阿里云识别: {ali_plate}")
+                    try:
+                        ali_plate = self.recognize_with_ali(file_path)
+                        print(f"  阿里云识别: {ali_plate}")
+                    except Exception as e:
+                        print(f"  阿里云识别异常: {str(e)}")
                 
                 # 检查是否需要移动到人工审核文件夹
                 valid_results = [r for r in [original_plate, hyperlpr_plate, ali_plate, paddle_plate] if r]
@@ -256,6 +313,9 @@ class LicensePlateVoting:
                 
             except Exception as e:
                 print(f"处理文件时出错: {str(e)}")
+                # 移动到人工审核文件夹(如果设置了)
+                if self.review_folder:
+                    self._move_to_review_folder(root_path, filename, rel_path)
                 self.statistics['errors'] += 1
         
         # 打印统计信息
@@ -372,11 +432,12 @@ def main():
     parser = argparse.ArgumentParser(description='车牌识别投票系统（含PaddleOCR）')
     parser.add_argument('folder', help='车牌图片所在文件夹路径')
     parser.add_argument('--review', help='需要人工审核的图片存放文件夹路径')
+    parser.add_argument('--timeout', type=int, default=30, help='识别超时时间（秒），默认30秒')
     
     args = parser.parse_args()
     
     # 创建投票系统
-    voter = LicensePlateVoting(review_folder=args.review)
+    voter = LicensePlateVoting(review_folder=args.review, timeout=args.timeout)
     
     # 处理文件夹
     voter.process_folder(args.folder)
