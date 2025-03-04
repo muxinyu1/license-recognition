@@ -5,13 +5,13 @@ import argparse
 
 def enhance_license_plate(image):
     """
-    增强车牌图像，使车牌区域更加清晰
+    增强车牌图像，使车牌区域更加清晰，并输出黑白图像
     
     Args:
         image: 输入的图像
         
     Returns:
-        增强后的图像
+        增强后的黑白图像
     """
     # 转换为灰度图
     if len(image.shape) > 2:
@@ -52,44 +52,49 @@ def enhance_license_plate(image):
                 mask = np.zeros_like(gray)
                 cv2.rectangle(mask, (x, y), (x + w, y + h), 255, -1)
                 
-                # 二值化处理（自适应阈值）
-                _, binary = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+                # 对车牌区域应用局部自适应阈值二值化
+                binary_adaptive = cv2.adaptiveThreshold(
+                    blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+                    cv2.THRESH_BINARY, 11, 2
+                )
                 
                 # 应用掩码，凸显车牌区域
-                result = cv2.bitwise_and(binary, mask)
+                roi = cv2.bitwise_and(binary_adaptive, mask)
                 
-                # 将车牌区域放回原图
-                if len(image.shape) > 2:
-                    result_colored = image.copy()
-                    mask_3d = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
-                    roi = cv2.bitwise_and(result_colored, mask_3d)
-                    
-                    # 增强对比度
-                    roi_enhanced = cv2.convertScaleAbs(roi, alpha=1.2, beta=10)
-                    
-                    # 将增强的区域与原图合并
-                    mask_inv = cv2.bitwise_not(mask_3d)
-                    background = cv2.bitwise_and(result_colored, mask_inv)
-                    result = cv2.add(background, roi_enhanced)
-                    return result
-                else:
-                    return result
+                # 将车牌区域放回整体二值化图像
+                # 先对整个图像进行二值化
+                _, binary_global = cv2.threshold(enhanced, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+                
+                # 创建反向掩码
+                mask_inv = cv2.bitwise_not(mask)
+                
+                # 将掩码外区域与全局二值化结果合并
+                background = cv2.bitwise_and(binary_global, mask_inv)
+                
+                # 合并车牌区域和背景
+                result = cv2.add(background, roi)
+                
+                return result
     
-    # 如果没有找到合适的车牌轮廓，则返回增强后的图像
+    # 如果没有找到合适的车牌轮廓，则返回增强后的二值化图像
     # 对图像进行锐化操作
     kernel = np.array([[-1, -1, -1], [-1, 9, -1], [-1, -1, -1]])
     sharpened = cv2.filter2D(blurred, -1, kernel)
     
-    # 二值化处理
-    _, binary = cv2.threshold(sharpened, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    # 尝试几种不同的二值化方法并选择最佳结果
+    # 1. Otsu二值化
+    _, binary_otsu = cv2.threshold(sharpened, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     
-    if len(image.shape) > 2:
-        # 将处理后的灰度图转回彩色图
-        result = cv2.cvtColor(binary, cv2.COLOR_GRAY2BGR)
-    else:
-        result = binary
-        
-    return result
+    # 2. 自适应阈值二值化
+    binary_adaptive = cv2.adaptiveThreshold(
+        sharpened, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+        cv2.THRESH_BINARY, 11, 2
+    )
+    
+    # 对两种二值化结果进行融合（取平均）
+    binary = cv2.addWeighted(binary_otsu, 0.5, binary_adaptive, 0.5, 0)
+    
+    return binary
 
 
 def process_directory(input_dir, output_dir):

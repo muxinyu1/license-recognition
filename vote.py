@@ -9,6 +9,7 @@ import shutil
 import argparse
 import hyperlpr3 as lpr3
 from collections import Counter
+from paddleocr import PaddleOCR
 from alibabacloud_ocr_api20210707.client import Client as ocr_api20210707Client
 from alibabacloud_tea_openapi import models as open_api_models
 from alibabacloud_darabonba_stream.client import Client as StreamClient
@@ -26,11 +27,18 @@ class LicensePlateVoting:
         self.access_key_id = os.environ.get('ALIBABA_CLOUD_ACCESS_KEY_ID')
         self.access_key_secret = os.environ.get('ALIBABA_CLOUD_ACCESS_KEY_SECRET')
         
-        if not self.access_key_id or not self.access_key_secret:
-            raise ValueError("请设置环境变量 ALIBABA_CLOUD_ACCESS_KEY_ID 和 ALIBABA_CLOUD_ACCESS_KEY_SECRET")
+        # 检查是否设置了阿里云环境变量
+        self.use_alibaba = False
+        if self.access_key_id and self.access_key_secret:
+            # 初始化阿里云OCR客户端
+            self.ali_client = self._create_ali_client()
+            self.use_alibaba = True
+            print("已启用阿里云OCR识别")
+        else:
+            print("未设置阿里云环境变量，将不使用阿里云OCR")
         
-        # 初始化阿里云OCR客户端
-        self.ali_client = self._create_ali_client()
+        # 初始化PaddleOCR
+        self.paddle_ocr = PaddleOCR(use_angle_cls=True, lang="ch", use_gpu=False)
         
         # 需要人工审核的图片存放文件夹
         self.review_folder = review_folder
@@ -75,6 +83,10 @@ class LicensePlateVoting:
     
     def recognize_with_ali(self, image_path):
         """使用阿里云OCR识别车牌"""
+        # 如果未启用阿里云，直接返回None
+        if not self.use_alibaba:
+            return None
+            
         try:
             # 检查文件是否存在
             if not os.path.exists(image_path):
@@ -105,6 +117,51 @@ class LicensePlateVoting:
                 return None
         except Exception as e:
             print(f"阿里云识别出错: {str(e)}")
+            return None
+    
+    def recognize_with_paddle(self, image_path):
+        """使用PaddleOCR识别车牌"""
+        try:
+            # 读取图片
+            image = cv2.imread(image_path)
+            if image is None:
+                print(f"PaddleOCR无法读取图片: {image_path}")
+                return None
+            
+            # 识别文本
+            result = self.paddle_ocr.ocr(image, cls=True)
+            
+            # 如果没有识别结果
+            if not result or len(result) == 0 or not result[0]:
+                return None
+            
+            # 提取所有文本
+            texts = []
+            for line in result[0]:
+                if len(line) >= 2 and isinstance(line[1], tuple) and len(line[1]) >= 1:
+                    texts.append(line[1][0])
+            
+            # 使用正则表达式找到车牌号
+            # 中国车牌号正则表达式(包括新能源车牌)
+            plate_pattern = r'[京津沪渝冀豫云辽黑湘皖鲁新苏浙赣鄂桂甘晋蒙陕吉闽贵粤青藏川宁琼使领][A-Z][A-Z0-9]{5,6}'
+            
+            for text in texts:
+                match = re.search(plate_pattern, text)
+                if match:
+                    return match.group(0)
+            
+            # 如果没有找到匹配的车牌号，选择最长的文本作为可能的车牌
+            if texts:
+                # 按长度排序并选择最有可能是车牌的文本
+                candidates = sorted(texts, key=len)
+                for candidate in candidates:
+                    # 车牌长度通常为7-8个字符
+                    if 6 <= len(candidate) <= 9 and any(c.isdigit() for c in candidate):
+                        return candidate
+            
+            return None
+        except Exception as e:
+            print(f"PaddleOCR识别出错: {str(e)}")
             return None
     
     def extract_original_plate(self, filename):
@@ -171,24 +228,31 @@ class LicensePlateVoting:
             file_path = os.path.join(root_path, filename)
             
             try:
-                # 获取三种识别结果
+                # 获取识别结果
                 original_plate = self.extract_original_plate(filename)
                 hyperlpr_plate = self.recognize_with_hyperlpr(file_path)
+                paddle_plate = self.recognize_with_paddle(file_path)
+                
+                # 阿里云识别结果（仅在启用阿里云时获取）
                 ali_plate = self.recognize_with_ali(file_path)
                 
                 print(f"  原始识别: {original_plate}")
                 print(f"  HyperLPR3识别: {hyperlpr_plate}")
-                print(f"  阿里云识别: {ali_plate}")
+                print(f"  PaddleOCR识别: {paddle_plate}")
+                if self.use_alibaba:
+                    print(f"  阿里云识别: {ali_plate}")
                 
                 # 检查是否需要移动到人工审核文件夹
+                valid_results = [r for r in [original_plate, hyperlpr_plate, ali_plate, paddle_plate] if r]
+                
                 if self.review_folder and (
-                    original_plate is None or hyperlpr_plate is None or ali_plate is None or
-                    (original_plate != hyperlpr_plate and hyperlpr_plate != ali_plate and original_plate != ali_plate)
+                    len(valid_results) < 2 or  # 少于两个有效结果
+                    len(set(valid_results)) == len(valid_results)  # 所有结果都不同
                 ):
                     self._move_to_review_folder(root_path, filename, rel_path)
                 else:
                     # 进行投票
-                    self._vote_and_rename(root_path, filename, original_plate, hyperlpr_plate, ali_plate)
+                    self._vote_and_rename(root_path, filename, original_plate, hyperlpr_plate, ali_plate, paddle_plate)
                 
             except Exception as e:
                 print(f"处理文件时出错: {str(e)}")
@@ -235,16 +299,27 @@ class LicensePlateVoting:
             print(f"  移动文件失败: {str(e)}")
             self.statistics['errors'] += 1
     
-    def _vote_and_rename(self, folder_path, filename, original_plate, hyperlpr_plate, ali_plate):
+    def _vote_and_rename(self, folder_path, filename, original_plate, hyperlpr_plate, ali_plate, paddle_plate):
         """进行投票并重命名文件"""
-        # 当某些识别结果为空时跳过投票
-        if not original_plate or not hyperlpr_plate or not ali_plate:
-            print("  存在空识别结果，保持文件名不变")
+        # 收集有效的识别结果
+        valid_results = []
+        if original_plate:
+            valid_results.append(original_plate)
+        if hyperlpr_plate:
+            valid_results.append(hyperlpr_plate)
+        if ali_plate:
+            valid_results.append(ali_plate)
+        if paddle_plate:
+            valid_results.append(paddle_plate)
+        
+        # 如果没有有效结果，保持不变
+        if not valid_results:
+            print("  没有有效的识别结果，保持文件名不变")
             self.statistics['unchanged'] += 1
             return
         
         # 进行投票
-        votes = Counter([original_plate, hyperlpr_plate, ali_plate])
+        votes = Counter(valid_results)
         most_common = votes.most_common(1)[0]
         plate_number = most_common[0]
         vote_count = most_common[1]
@@ -256,9 +331,9 @@ class LicensePlateVoting:
         # 获取文件扩展名
         _, extension = os.path.splitext(filename)
         
-        # 如果三个结果都不同，保持原文件名
-        if vote_count == 1:
-            print("  三种识别结果不一致，保持文件名不变")
+        # 如果没有明显的赢家（最高票数只有1票），保持原文件名
+        if vote_count == 1 and len(valid_results) > 1:
+            print("  没有明显的赢家，保持文件名不变")
             self.statistics['unchanged'] += 1
             return
         
@@ -289,11 +364,12 @@ class LicensePlateVoting:
 
 def main():
     """主函数"""
-    print("车牌识别投票系统")
+    print("车牌识别投票系统（含PaddleOCR）")
     print("=" * 50)
+    print("注意：如需启用阿里云OCR，请设置环境变量 ALIBABA_CLOUD_ACCESS_KEY_ID 和 ALIBABA_CLOUD_ACCESS_KEY_SECRET")
     
     # 解析命令行参数
-    parser = argparse.ArgumentParser(description='车牌识别投票系统')
+    parser = argparse.ArgumentParser(description='车牌识别投票系统（含PaddleOCR）')
     parser.add_argument('folder', help='车牌图片所在文件夹路径')
     parser.add_argument('--review', help='需要人工审核的图片存放文件夹路径')
     
